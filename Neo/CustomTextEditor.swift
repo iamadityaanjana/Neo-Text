@@ -89,11 +89,177 @@ class RichTextView: NSTextView {
             case "i": 
                 toggleItalic()
                 return
+            case "k":
+                insertHyperlink()
+                return
             default: 
                 break
             }
         }
         super.keyDown(with: event)
+    }
+    
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        if sender.draggingPasteboard.canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) {
+            return .copy
+        }
+        return []
+    }
+    
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let pasteboard = sender.draggingPasteboard
+        if let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] {
+            for url in urls {
+                if isImageFile(url: url) {
+                    insertImage(at: url)
+                }
+            }
+            return true
+        }
+        return false
+    }
+    
+    private func isImageFile(url: URL) -> Bool {
+        let imageExtensions = ["jpg", "jpeg", "png", "gif", "bmp", "tiff", "webp"]
+        return imageExtensions.contains(url.pathExtension.lowercased())
+    }
+    
+    private func insertImage(at url: URL) {
+        guard let image = NSImage(contentsOf: url) else { return }
+        
+        // Create resizable image attachment
+        let attachment = NSTextAttachment()
+        
+        // Calculate size - max 300pt width, maintain aspect ratio
+        let maxWidth: CGFloat = 300
+        let originalSize = image.size
+        let aspectRatio = originalSize.height / originalSize.width
+        let newWidth = min(maxWidth, originalSize.width)
+        let newHeight = newWidth * aspectRatio
+        
+        attachment.image = image
+        attachment.bounds = CGRect(x: 0, y: 0, width: newWidth, height: newHeight)
+        
+        // Create attributed string with the image
+        let imageString = NSAttributedString(attachment: attachment)
+        
+        // Insert at current cursor position
+        let selectedRange = self.selectedRange()
+        
+        // Add newlines for proper spacing and centering
+        let mutableString = NSMutableAttributedString()
+        mutableString.append(NSAttributedString(string: "\n"))
+        mutableString.append(imageString)
+        mutableString.append(NSAttributedString(string: "\n"))
+        
+        // Apply center alignment to the image
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.alignment = .center
+        mutableString.addAttribute(.paragraphStyle, value: paragraphStyle, range: NSRange(location: 0, length: mutableString.length))
+        
+        if shouldChangeText(in: selectedRange, replacementString: mutableString.string) {
+            textStorage?.replaceCharacters(in: selectedRange, with: mutableString)
+            didChangeText()
+            
+            // Move cursor after the image
+            let newLocation = selectedRange.location + mutableString.length
+            setSelectedRange(NSRange(location: newLocation, length: 0))
+        }
+    }
+    
+    private func insertHyperlink() {
+        let selectedRange = self.selectedRange()
+        
+        if selectedRange.length > 0 {
+            // Text is selected - make it a hyperlink
+            let selectedText = (string as NSString).substring(with: selectedRange)
+            showHyperlinkDialog(selectedText: selectedText, range: selectedRange)
+        } else {
+            // No selection - insert new hyperlink
+            showHyperlinkDialog(selectedText: "", range: selectedRange)
+        }
+    }
+    
+    private func showHyperlinkDialog(selectedText: String, range: NSRange) {
+        let alert = NSAlert()
+        alert.messageText = "Add Hyperlink"
+        alert.informativeText = ""
+        alert.alertStyle = .informational
+        
+        // Create container view with padding
+        let containerView = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 120))
+        
+        // URL label
+        let urlLabel = NSTextField(labelWithString: "URL:")
+        urlLabel.font = NSFont.systemFont(ofSize: 13, weight: .medium)
+        urlLabel.textColor = NSColor.labelColor
+        urlLabel.frame = NSRect(x: 0, y: 90, width: 340, height: 18)
+        containerView.addSubview(urlLabel)
+        
+        // URL field with modern styling
+        let urlField = NSTextField(frame: NSRect(x: 0, y: 65, width: 340, height: 28))
+        urlField.placeholderString = "https://example.com"
+        urlField.bezelStyle = .roundedBezel
+        urlField.font = NSFont.systemFont(ofSize: 13)
+        urlField.focusRingType = .none
+        containerView.addSubview(urlField)
+        
+        // Display text label
+        let textLabel = NSTextField(labelWithString: "Display Text:")
+        textLabel.font = NSFont.systemFont(ofSize: 13, weight: .medium)
+        textLabel.textColor = NSColor.labelColor
+        textLabel.frame = NSRect(x: 0, y: 35, width: 340, height: 18)
+        containerView.addSubview(textLabel)
+        
+        // Display text field with modern styling
+        let textField = NSTextField(frame: NSRect(x: 0, y: 10, width: 340, height: 28))
+        textField.placeholderString = "Link text (optional)"
+        textField.stringValue = selectedText
+        textField.bezelStyle = .roundedBezel
+        textField.font = NSFont.systemFont(ofSize: 13)
+        textField.focusRingType = .none
+        containerView.addSubview(textField)
+        
+        alert.accessoryView = containerView
+        
+        // Style the buttons
+        let addButton = alert.addButton(withTitle: "Add Link")
+        addButton.keyEquivalent = "\r" // Enter key
+        let cancelButton = alert.addButton(withTitle: "Cancel")
+        cancelButton.keyEquivalent = "\u{1b}" // Escape key
+        
+        // Focus on URL field initially
+        DispatchQueue.main.async {
+            urlField.becomeFirstResponder()
+        }
+        
+        if alert.runModal() == .alertFirstButtonReturn {
+            let urlString = urlField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            let displayText = textField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            
+            if !urlString.isEmpty {
+                let linkText = displayText.isEmpty ? urlString : displayText
+                insertHyperlinkText(linkText, url: urlString, at: range)
+            }
+        }
+    }
+    
+    private func insertHyperlinkText(_ text: String, url: String, at range: NSRange) {
+        guard let validURL = URL(string: url) else { return }
+        
+        let attributedString = NSMutableAttributedString(string: text)
+        attributedString.addAttribute(.link, value: validURL, range: NSRange(location: 0, length: text.count))
+        attributedString.addAttribute(.foregroundColor, value: NSColor.systemBlue, range: NSRange(location: 0, length: text.count))
+        attributedString.addAttribute(.underlineStyle, value: NSUnderlineStyle.single.rawValue, range: NSRange(location: 0, length: text.count))
+        
+        if shouldChangeText(in: range, replacementString: text) {
+            textStorage?.replaceCharacters(in: range, with: attributedString)
+            didChangeText()
+            
+            // Move cursor after the link
+            let newLocation = range.location + text.count
+            setSelectedRange(NSRange(location: newLocation, length: 0))
+        }
     }
     
     private func toggleBold() {
