@@ -1,38 +1,42 @@
 import SwiftUI
+import Foundation
+import AppKit
 import Combine
 
 // A custom NSViewRepresentable wrapping NSTextView to enable line centering + focus visuals.
 struct FocusTextEditorRepresentable: NSViewRepresentable {
     @Binding var text: String
     @Binding var richContent: Data?
+    @Binding var cachePath: String?
+    var docId: UUID?
     @Binding var currentLine: Int
     var isDark: Bool
     var centerLine: Bool
     var fontSize: CGFloat = 18
-    
+
     func makeCoordinator() -> Coordinator { Coordinator(self) }
-    
+
     func makeNSView(context: Context) -> NSScrollView {
         let scrollView = NSScrollView()
-    scrollView.drawsBackground = false
-    scrollView.hasVerticalScroller = true // enable vertical scrolling
+        scrollView.drawsBackground = false
+        scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = false
         scrollView.autohidesScrollers = true
-    scrollView.scrollerStyle = .overlay
+        scrollView.scrollerStyle = .overlay
         scrollView.scrollerKnobStyle = .light
-        
+
         let textStorage = NSTextStorage()
         let layoutManager = NSLayoutManager()
         textStorage.addLayoutManager(layoutManager)
-        let textContainer = NSTextContainer(size: .init(width: CGFloat.greatestFiniteMagnitude, height: .greatestFiniteMagnitude))
+        let textContainer = NSTextContainer(size: .init(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude))
         textContainer.widthTracksTextView = true
         textContainer.heightTracksTextView = false
         layoutManager.addTextContainer(textContainer)
-        
-    let textView = CenteringTextView(frame: .zero, textContainer: textContainer)
-    textView.backgroundColor = .clear
-    // Minimal padding for focus mode to avoid cursor positioning issues
-    textView.textContainerInset = NSSize(width: 0, height: 20)
+
+        let textView = CenteringTextView(frame: .zero, textContainer: textContainer)
+        textView.backgroundColor = .clear
+        // Minimal padding for focus mode to avoid cursor positioning issues
+        textView.textContainerInset = NSSize(width: 0, height: 20)
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = false
         textView.autoresizingMask = [.width]
@@ -40,16 +44,16 @@ struct FocusTextEditorRepresentable: NSViewRepresentable {
         textView.delegate = context.coordinator
         textView.isRichText = true
         textView.allowsUndo = true
-    textView.font = .monospacedSystemFont(ofSize: fontSize, weight: .regular)
+        textView.font = .monospacedSystemFont(ofSize: fontSize, weight: .regular)
         textView.textColor = isDark ? .white : .black
         textView.insertionPointColor = isDark ? .white : .black
-    textView.textContainer?.lineFragmentPadding = 0
+        textView.textContainer?.lineFragmentPadding = 0
 
-        // Load initial content: prefer rich content if available (RTFD first, then RTF)
-        if let richData = richContent, !richData.isEmpty {
-            if let attributed = NSAttributedString(rtfd: richData, documentAttributes: nil) {
-                textView.textStorage?.setAttributedString(attributed)
-            } else if let attributed = NSAttributedString(rtf: richData, documentAttributes: nil) {
+        // Load initial content: prefer cache (RTFD), then rich content, then plain text
+    if let att = FT_loadAttributedFromCache(docId: docId, cachePath: cachePath) {
+            textView.textStorage?.setAttributedString(att)
+        } else if let richData = richContent, !richData.isEmpty {
+            if let attributed = NSAttributedString(rtfd: richData, documentAttributes: nil) ?? NSAttributedString(rtf: richData, documentAttributes: nil) {
                 textView.textStorage?.setAttributedString(attributed)
             } else {
                 textView.string = text
@@ -57,70 +61,119 @@ struct FocusTextEditorRepresentable: NSViewRepresentable {
         } else {
             textView.string = text
         }
-        
-        // Set default paragraph style with left alignment
+
+        // Default typing attributes: left aligned + font/color
+
         let defaultParagraphStyle = NSMutableParagraphStyle()
+
         defaultParagraphStyle.alignment = .left
+
+        context.coordinator.hasLoadedInitialContent = true
+
+        textView.setSelectedRange(NSRange(location: textView.string.count, length: 0))
+
         textView.defaultParagraphStyle = defaultParagraphStyle
+
         textView.typingAttributes[.paragraphStyle] = defaultParagraphStyle
-        
+
+        textView.typingAttributes[.font] = textView.font
+
+        textView.typingAttributes[.foregroundColor] = textView.textColor
+
         textView.focusDelegate = context.coordinator
-        
+
         scrollView.documentView = textView
         context.coordinator.textView = textView
         context.coordinator.scrollView = scrollView
-        
+        context.coordinator.lastCachePath = cachePath
+
         return scrollView
     }
-    
+
     func updateNSView(_ nsView: NSScrollView, context: Context) {
         // Never overwrite content here; only update lightweight styling
         guard let textView = context.coordinator.textView else { return }
         textView.textColor = isDark ? .white : .black
         textView.insertionPointColor = isDark ? .white : .black
         // Avoid resetting font here to preserve typingAttributes (bold/italic)
+
+        if context.coordinator.hasLoadedInitialContent == false {
+            // Load once when switching documents
+            context.coordinator.isProgrammaticLoad = true
+            if let att = FT_loadAttributedFromCache(docId: docId, cachePath: cachePath) {
+                textView.textStorage?.setAttributedString(att)
+            } else if let rich = richContent, !rich.isEmpty, let attributed = NSAttributedString(rtfd: rich, documentAttributes: nil) ?? NSAttributedString(rtf: rich, documentAttributes: nil) {
+                textView.textStorage?.setAttributedString(attributed)
+            } else {
+                textView.string = text
+            }
+            context.coordinator.hasLoadedInitialContent = true
+        }
+
+        if context.coordinator.lastCachePath != cachePath {
+            context.coordinator.isProgrammaticLoad = true
+            if let att = FT_loadAttributedFromCache(docId: docId, cachePath: cachePath) {
+                textView.textStorage?.setAttributedString(att)
+            } else if let rich = richContent, !rich.isEmpty, let attributed = NSAttributedString(rtfd: rich, documentAttributes: nil) ?? NSAttributedString(rtf: rich, documentAttributes: nil) {
+                textView.textStorage?.setAttributedString(attributed)
+            } else {
+                textView.string = text
+            }
+            context.coordinator.lastCachePath = cachePath
+            // Update cursor and typingAttributes
+            textView.setSelectedRange(NSRange(location: textView.string.count, length: 0))
+            let defaultParagraphStyle = NSMutableParagraphStyle()
+            defaultParagraphStyle.alignment = .left
+            textView.typingAttributes[.paragraphStyle] = defaultParagraphStyle
+            textView.typingAttributes[.font] = textView.font
+            textView.typingAttributes[.foregroundColor] = textView.textColor
+        }
+
+        // Optionally keep current line centered when requested
+        if centerLine {
+            context.coordinator.centerCurrentLine(animated: false)
+        }
     }
-    
+
     class Coordinator: NSObject, NSTextViewDelegate, FocusLineDelegate {
         var parent: FocusTextEditorRepresentable
         weak var textView: CenteringTextView?
         weak var scrollView: NSScrollView?
-        private var cancellables = Set<AnyCancellable>()
-        var shouldLoadRichContent = false
-        var shouldLoadPlainText = false
-        
+        var hasLoadedInitialContent = false
+        var isProgrammaticLoad = false
+        var lastCachePath: String?
+
         init(_ parent: FocusTextEditorRepresentable) {
             self.parent = parent
         }
-        
+
         func textDidChange(_ notification: Notification) {
             guard let tv = textView else { return }
+            if isProgrammaticLoad { isProgrammaticLoad = false; return }
             parent.text = tv.string
 
-            // Always save RTFD so images/attachments persist reliably
             if let textStorage = tv.textStorage {
-                let fullRange = NSRange(location: 0, length: textStorage.length)
-                if let rtfdData = textStorage.rtfd(from: fullRange, documentAttributes: [:]) {
-                    parent.richContent = rtfdData
-                } else if let rtfData = textStorage.rtf(from: fullRange, documentAttributes: [:]) {
-                    parent.richContent = rtfData
+                let full = NSRange(location: 0, length: textStorage.length)
+                if let id = parent.docId {
+                    let path = FT_saveAttributedToCache(docId: id, textStorage: textStorage)
+                    parent.cachePath = path
+                    // prefer cache; keep JSON lean
+                    parent.richContent = nil
+                } else {
+                    parent.richContent = textStorage.rtfd(from: full, documentAttributes: [:]) ?? textStorage.rtf(from: full, documentAttributes: [:])
                 }
             }
 
             updateCurrentLine()
             if parent.centerLine { centerCurrentLine(animated: true) }
         }
-        
-        func loadDocumentContent() {
-            shouldLoadRichContent = true
-            shouldLoadPlainText = true
-        }
 
         func textViewDidChangeSelection(_ notification: Notification) {
             updateCurrentLine()
             if parent.centerLine { centerCurrentLine(animated: true) }
         }
-        
+
+        // FocusLineDelegate
         func updateCurrentLine() {
             guard let tv = textView else { return }
             let caret = tv.selectedRange().location
@@ -139,7 +192,7 @@ struct FocusTextEditorRepresentable: NSViewRepresentable {
             parent.currentLine = foundLine
             tv.focusedLineIndex = foundLine
         }
-        
+
         func centerCurrentLine(animated: Bool) {
             guard let tv = textView, let sv = scrollView else { return }
             guard let layoutManager = tv.layoutManager, let textContainer = tv.textContainer else { return }
@@ -284,6 +337,9 @@ class CenteringTextView: NSTextView {
         // Insert at current cursor position
         let selectedRange = self.selectedRange()
         
+        // Capture current typing attributes to restore after the image
+        let currentTyping = typingAttributes
+
         // Create a new line before and after the image, with center alignment
         let mutableString = NSMutableAttributedString()
         
@@ -309,18 +365,20 @@ class CenteringTextView: NSTextView {
         imageContainer.append(centeredImageString)
         imageContainer.append(NSAttributedString(string: "\n"))
         
-    // Apply paragraph style to the entire container
+        // Apply paragraph style to the entire container
         let containerParagraphStyle = NSMutableParagraphStyle()
         containerParagraphStyle.alignment = .center
         imageContainer.addAttribute(.paragraphStyle, value: containerParagraphStyle, range: NSRange(location: 0, length: imageContainer.length))
         
-    // Append image container and then a left-aligned newline to resume typing left
-    mutableString.append(imageContainer)
-    let trailing = NSMutableAttributedString(string: "\n")
-    let leftStyle = NSMutableParagraphStyle()
-    leftStyle.alignment = .left
-    trailing.addAttribute(.paragraphStyle, value: leftStyle, range: NSRange(location: 0, length: trailing.length))
-    mutableString.append(trailing)
+        // Append image container and then a left-aligned newline to resume typing left
+        mutableString.append(imageContainer)
+        let trailing = NSMutableAttributedString(string: "\n")
+        let leftStyle = NSMutableParagraphStyle()
+        leftStyle.alignment = .left
+        trailing.addAttribute(.paragraphStyle, value: leftStyle, range: NSRange(location: 0, length: trailing.length))
+        if let f = (currentTyping[.font] as? NSFont) ?? self.font { trailing.addAttribute(.font, value: f, range: NSRange(location: 0, length: trailing.length)) }
+        if let c = (currentTyping[.foregroundColor] as? NSColor) ?? self.textColor { trailing.addAttribute(.foregroundColor, value: c, range: NSRange(location: 0, length: trailing.length)) }
+        mutableString.append(trailing)
         
         if shouldChangeText(in: selectedRange, replacementString: mutableString.string) {
             textStorage?.replaceCharacters(in: selectedRange, with: mutableString)
@@ -329,7 +387,15 @@ class CenteringTextView: NSTextView {
             // Move cursor after the image and trailing newline, and set typing attributes to left-aligned
             let newLocation = selectedRange.location + mutableString.length
             setSelectedRange(NSRange(location: newLocation, length: 0))
+            // Restore typing attributes (font/color + left paragraph)
+
+            typingAttributes = currentTyping
+
             typingAttributes[.paragraphStyle] = leftStyle
+
+            typingAttributes[.font] = currentTyping[.font] ?? self.font
+
+            typingAttributes[.foregroundColor] = currentTyping[.foregroundColor] ?? self.textColor
         }
         
         focusDelegate?.updateCurrentLine()
@@ -641,4 +707,40 @@ class CenteringTextView: NSTextView {
         textStorage?.endEditing()
         focusDelegate?.updateCurrentLine()
     }
+}
+
+// MARK: - Local cache helpers (scoped for this file)
+private func FT_cacheFileURL(for docId: UUID) -> URL? {
+    do {
+        let base = try FileManager.default.url(for: .cachesDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+        let dir = base.appendingPathComponent("NeoRichCache", isDirectory: true)
+        if !FileManager.default.fileExists(atPath: dir.path) {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        return dir.appendingPathComponent("\(docId.uuidString).rtfddata")
+    } catch { return nil }
+}
+
+private func FT_loadAttributedFromCache(docId: UUID?, cachePath: String?) -> NSAttributedString? {
+    if let p = cachePath, let data = try? Data(contentsOf: URL(fileURLWithPath: p)) {
+        return NSAttributedString(rtfd: data, documentAttributes: nil) ?? NSAttributedString(rtf: data, documentAttributes: nil)
+    }
+    if let id = docId, let url = FT_cacheFileURL(for: id), let data = try? Data(contentsOf: url) {
+        return NSAttributedString(rtfd: data, documentAttributes: nil) ?? NSAttributedString(rtf: data, documentAttributes: nil)
+    }
+    return nil
+}
+
+@discardableResult
+private func FT_saveAttributedToCache(docId: UUID, textStorage: NSTextStorage) -> String? {
+    let full = NSRange(location: 0, length: textStorage.length)
+    guard let data = textStorage.rtfd(from: full, documentAttributes: [:]) ?? textStorage.rtf(from: full, documentAttributes: [:]) else { return nil }
+    guard let url = FT_cacheFileURL(for: docId) else { return nil }
+    do {
+        let tmp = url.appendingPathExtension("tmp")
+        try data.write(to: tmp, options: .atomic)
+        if FileManager.default.fileExists(atPath: url.path) { try FileManager.default.removeItem(at: url) }
+        try FileManager.default.moveItem(at: tmp, to: url)
+        return url.path
+    } catch { return nil }
 }

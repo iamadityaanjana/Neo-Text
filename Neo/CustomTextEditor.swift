@@ -1,8 +1,12 @@
 import SwiftUI
+import AppKit
+import Foundation
 
 struct CustomTextEditor: NSViewRepresentable {
     @Binding var text: String
     @Binding var richContent: Data?
+    @Binding var cachePath: String?
+    var docId: UUID?
     var font: NSFont
     var textColor: NSColor
     var backgroundColor: NSColor
@@ -34,16 +38,16 @@ struct CustomTextEditor: NSViewRepresentable {
         textView.delegate = context.coordinator
         textView.isRichText = true
         textView.allowsUndo = true
-        textView.font = font
+    textView.font = font
         textView.textColor = textColor
         textView.insertionPointColor = textColor
         textView.textContainer?.lineFragmentPadding = 0
 
-        // Load initial content: prefer rich content if available (RTFD first, then RTF)
-        if let richData = richContent, !richData.isEmpty {
-            if let attributed = NSAttributedString(rtfd: richData, documentAttributes: nil) {
-                textView.textStorage?.setAttributedString(attributed)
-            } else if let attributed = NSAttributedString(rtf: richData, documentAttributes: nil) {
+    // Load initial content: prefer cache (RTFD), then rich content, then plain text
+    if let att = CT_loadAttributedFromCache(docId: docId, cachePath: cachePath) {
+            textView.textStorage?.setAttributedString(att)
+        } else if let richData = richContent, !richData.isEmpty {
+            if let attributed = NSAttributedString(rtfd: richData, documentAttributes: nil) ?? NSAttributedString(rtf: richData, documentAttributes: nil) {
                 textView.textStorage?.setAttributedString(attributed)
             } else {
                 textView.string = text
@@ -52,23 +56,68 @@ struct CustomTextEditor: NSViewRepresentable {
             textView.string = text
         }
 
-    // Ensure default typing is left-aligned
+    // Ensure default typing is left-aligned and carries font/color
+
     let defaultParagraphStyle = NSMutableParagraphStyle()
+
     defaultParagraphStyle.alignment = .left
+
+    context.coordinator.hasLoadedInitialContent = true
+
+    textView.setSelectedRange(NSRange(location: textView.string.count, length: 0))
+
     textView.defaultParagraphStyle = defaultParagraphStyle
+
     textView.typingAttributes[.paragraphStyle] = defaultParagraphStyle
+
+    textView.typingAttributes[.font] = font
+
+    textView.typingAttributes[.foregroundColor] = textColor
         
         scrollView.documentView = textView
         context.coordinator.textView = textView
+        context.coordinator.lastCachePath = cachePath
         return scrollView
     }
     
     func updateNSView(_ nsView: NSScrollView, context: Context) {
-        // Never overwrite content here; only update lightweight styling
+        // Never overwrite user content during editing; only update lightweight styling
         guard let textView = context.coordinator.textView else { return }
         textView.textColor = textColor
         textView.insertionPointColor = textColor
         // Avoid resetting font here to preserve typingAttributes (bold/italic)
+
+        // If this view hasn't loaded content yet, load from cache/rich/text once.
+        if context.coordinator.hasLoadedInitialContent == false {
+            context.coordinator.isProgrammaticLoad = true
+            if let att = CT_loadAttributedFromCache(docId: docId, cachePath: cachePath) {
+                textView.textStorage?.setAttributedString(att)
+            } else if let rich = richContent, !rich.isEmpty, let attributed = NSAttributedString(rtfd: rich, documentAttributes: nil) ?? NSAttributedString(rtf: rich, documentAttributes: nil) {
+                textView.textStorage?.setAttributedString(attributed)
+            } else {
+                textView.string = text
+            }
+            context.coordinator.hasLoadedInitialContent = true
+        }
+
+        if context.coordinator.lastCachePath != cachePath {
+            context.coordinator.isProgrammaticLoad = true
+            if let att = CT_loadAttributedFromCache(docId: docId, cachePath: cachePath) {
+                textView.textStorage?.setAttributedString(att)
+            } else if let rich = richContent, !rich.isEmpty, let attributed = NSAttributedString(rtfd: rich, documentAttributes: nil) ?? NSAttributedString(rtf: rich, documentAttributes: nil) {
+                textView.textStorage?.setAttributedString(attributed)
+            } else {
+                textView.string = text
+            }
+            context.coordinator.lastCachePath = cachePath
+            // Update cursor and typingAttributes
+            textView.setSelectedRange(NSRange(location: textView.string.count, length: 0))
+            let defaultParagraphStyle = NSMutableParagraphStyle()
+            defaultParagraphStyle.alignment = .left
+            textView.typingAttributes[.paragraphStyle] = defaultParagraphStyle
+            textView.typingAttributes[.font] = font
+            textView.typingAttributes[.foregroundColor] = textColor
+        }
     }
     
     func makeCoordinator() -> Coordinator {
@@ -78,10 +127,11 @@ struct CustomTextEditor: NSViewRepresentable {
     class Coordinator: NSObject, NSTextViewDelegate {
         var parent: CustomTextEditor
         weak var textView: RichTextView?
-    var shouldLoadRichContent = false
-    var shouldLoadPlainText = false
+        var shouldLoadRichContent = false
+        var shouldLoadPlainText = false
     var hasLoadedInitialContent = false
     var isProgrammaticLoad = false
+    var lastCachePath: String?
         
         init(_ parent: CustomTextEditor) {
             self.parent = parent
@@ -92,13 +142,17 @@ struct CustomTextEditor: NSViewRepresentable {
             if isProgrammaticLoad { isProgrammaticLoad = false; return }
             parent.text = textView.string
 
-            // Always save RTFD so images/attachments persist reliably
+            // Always save to cache so images/attachments persist reliably
             if let textStorage = textView.textStorage {
-                let fullRange = NSRange(location: 0, length: textStorage.length)
-                if let rtfdData = textStorage.rtfd(from: fullRange, documentAttributes: [:]) {
-                    parent.richContent = rtfdData
-                } else if let rtfData = textStorage.rtf(from: fullRange, documentAttributes: [:]) {
-                    parent.richContent = rtfData
+                if let id = parent.docId {
+                    let path = CT_saveAttributedToCache(docId: id, textStorage: textStorage)
+                    parent.cachePath = path
+                    // We prefer cache; do not grow JSON with embedded data
+                    parent.richContent = nil
+                } else {
+                    // Fallback to in-memory richContent if no id
+                    let fullRange = NSRange(location: 0, length: textStorage.length)
+                    parent.richContent = textStorage.rtfd(from: fullRange, documentAttributes: [:]) ?? textStorage.rtf(from: fullRange, documentAttributes: [:])
                 }
             }
         }
@@ -108,6 +162,42 @@ struct CustomTextEditor: NSViewRepresentable {
             shouldLoadPlainText = true
         }
     }
+}
+
+// MARK: - Local cache helpers (scoped for this file)
+private func CT_cacheFileURL(for docId: UUID) -> URL? {
+    do {
+        let base = try FileManager.default.url(for: .cachesDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+        let dir = base.appendingPathComponent("NeoRichCache", isDirectory: true)
+        if !FileManager.default.fileExists(atPath: dir.path) {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        return dir.appendingPathComponent("\(docId.uuidString).rtfddata")
+    } catch { return nil }
+}
+
+private func CT_loadAttributedFromCache(docId: UUID?, cachePath: String?) -> NSAttributedString? {
+    if let p = cachePath, let data = try? Data(contentsOf: URL(fileURLWithPath: p)) {
+        return NSAttributedString(rtfd: data, documentAttributes: nil) ?? NSAttributedString(rtf: data, documentAttributes: nil)
+    }
+    if let id = docId, let url = CT_cacheFileURL(for: id), let data = try? Data(contentsOf: url) {
+        return NSAttributedString(rtfd: data, documentAttributes: nil) ?? NSAttributedString(rtf: data, documentAttributes: nil)
+    }
+    return nil
+}
+
+@discardableResult
+private func CT_saveAttributedToCache(docId: UUID, textStorage: NSTextStorage) -> String? {
+    let full = NSRange(location: 0, length: textStorage.length)
+    guard let data = textStorage.rtfd(from: full, documentAttributes: [:]) ?? textStorage.rtf(from: full, documentAttributes: [:]) else { return nil }
+    guard let url = CT_cacheFileURL(for: docId) else { return nil }
+    do {
+        let tmp = url.appendingPathExtension("tmp")
+        try data.write(to: tmp, options: .atomic)
+        if FileManager.default.fileExists(atPath: url.path) { try FileManager.default.removeItem(at: url) }
+        try FileManager.default.moveItem(at: tmp, to: url)
+        return url.path
+    } catch { return nil }
 }
 
 class RichTextView: NSTextView {
@@ -203,7 +293,10 @@ class RichTextView: NSTextView {
         // Insert at current cursor position
         let selectedRange = self.selectedRange()
         
-        // Create a new line before and after the image, with center alignment
+    // Capture current typing attributes to restore after the image
+    let currentTyping = typingAttributes
+
+    // Create a new line before and after the image, with center alignment
         let mutableString = NSMutableAttributedString()
         
         // Add leading newline if not at start of line
@@ -239,6 +332,8 @@ class RichTextView: NSTextView {
     let leftStyle = NSMutableParagraphStyle()
     leftStyle.alignment = .left
     trailing.addAttribute(.paragraphStyle, value: leftStyle, range: NSRange(location: 0, length: trailing.length))
+    if let f = (currentTyping[.font] as? NSFont) ?? self.font { trailing.addAttribute(.font, value: f, range: NSRange(location: 0, length: trailing.length)) }
+    if let c = (currentTyping[.foregroundColor] as? NSColor) ?? self.textColor { trailing.addAttribute(.foregroundColor, value: c, range: NSRange(location: 0, length: trailing.length)) }
     mutableString.append(trailing)
         
         if shouldChangeText(in: selectedRange, replacementString: mutableString.string) {
@@ -248,7 +343,15 @@ class RichTextView: NSTextView {
             // Move cursor after the image and trailing newline, and set typing attributes to left-aligned
             let newLocation = selectedRange.location + mutableString.length
             setSelectedRange(NSRange(location: newLocation, length: 0))
+            // Restore typing attributes (font/color + left paragraph)
+
+            typingAttributes = currentTyping
+
             typingAttributes[.paragraphStyle] = leftStyle
+
+            typingAttributes[.font] = currentTyping[.font] ?? self.font
+
+            typingAttributes[.foregroundColor] = currentTyping[.foregroundColor] ?? self.textColor
         }
     }
     

@@ -19,6 +19,7 @@ struct ContentView: View {
         } else {
             if let document = selectedDocument {
                 EditorView(documentManager: documentManager, selectedDocument: $selectedDocument)
+                    .id(document.id) // Recreate editor per document to prevent state bleed
                     .transition(.move(edge: .trailing))
             } else {
                 DashboardView(documentManager: documentManager, selectedDocument: $selectedDocument)

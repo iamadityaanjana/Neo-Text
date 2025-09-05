@@ -12,6 +12,7 @@ struct Document: Identifiable, Codable, Equatable {
     var title: String
     var content: String
     var richContent: Data? // Store RTF/RTFD data to preserve images and formatting
+    var cachePath: String? // Path to cached rich data (RTFD preferred)
     var creationDate: Date
     var lastEdited: Date
 }
