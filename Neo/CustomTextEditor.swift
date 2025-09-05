@@ -94,7 +94,7 @@ class RichTextView: NSTextView {
                 return
             case "v":
                 // Handle paste with image support
-                paste(nil)
+                paste(self)
                 return
             default: 
                 break
@@ -106,9 +106,37 @@ class RichTextView: NSTextView {
     override func paste(_ sender: Any?) {
         let pasteboard = NSPasteboard.general
         
-        // Check for images first
-        if let imageData = pasteboard.data(forType: .tiff) ?? pasteboard.data(forType: .png),
-           let image = NSImage(data: imageData) {
+        // Check for images first - try multiple methods
+        var image: NSImage? = nil
+        
+        // Method 1: Check for direct NSImage
+        if let pasteboardImage = NSImage(pasteboard: pasteboard) {
+            image = pasteboardImage
+        }
+        // Method 2: Check for file URLs first (important for Finder)
+        else if let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] {
+            for url in urls {
+                if isImageFile(url: url), let urlImage = NSImage(contentsOf: url) {
+                    image = urlImage
+                    break
+                }
+            }
+        }
+        // Method 3: Check for image data in various formats
+        else if let imageData = pasteboard.data(forType: .tiff) ?? 
+                                 pasteboard.data(forType: .png) ?? 
+                                 pasteboard.data(forType: NSPasteboard.PasteboardType("public.jpeg")) ??
+                                 pasteboard.data(forType: NSPasteboard.PasteboardType("public.png")) ??
+                                 pasteboard.data(forType: NSPasteboard.PasteboardType("public.tiff")) ??
+                                 pasteboard.data(forType: NSPasteboard.PasteboardType("com.adobe.pdf")) {
+            image = NSImage(data: imageData)
+        }
+        // Method 4: Check for file promise (drag and drop compatibility)
+        else if pasteboard.canReadObject(forClasses: [NSFilePromiseReceiver.self], options: nil) {
+            // Handle file promises if needed
+        }
+        
+        if let image = image {
             insertImageFromPasteboard(image: image)
             return
         }
@@ -219,8 +247,20 @@ class RichTextView: NSTextView {
     }
     
     private func isImageFile(url: URL) -> Bool {
-        let imageExtensions = ["jpg", "jpeg", "png", "gif", "bmp", "tiff", "webp"]
-        return imageExtensions.contains(url.pathExtension.lowercased())
+        let imageExtensions = ["jpg", "jpeg", "png", "gif", "bmp", "tiff", "tif", "webp", "heic", "heif", "svg", "ico", "pdf"]
+        let pathExtension = url.pathExtension.lowercased()
+        
+        // Check file extension
+        if imageExtensions.contains(pathExtension) {
+            return true
+        }
+        
+        // Check UTI (Uniform Type Identifier) for more reliable detection
+        if let uti = try? url.resourceValues(forKeys: [.typeIdentifierKey]).typeIdentifier {
+            return uti.hasPrefix("public.image") || uti == "com.adobe.pdf"
+        }
+        
+        return false
     }
     
     private func insertImage(at url: URL) {
