@@ -46,16 +46,8 @@ struct EditorView: View {
                     .padding(.top, 20)
                     .padding(.bottom, 10)
                 } else {
-                    // Compact top bar: centered title + exit focus button
+                    // Compact top bar: just exit focus button
                     HStack {
-                        Spacer()
-                        TextField("Title", text: $title)
-                            .multilineTextAlignment(.center)
-                            .textFieldStyle(.plain)
-                            .font(.system(size: 30, weight: .bold))
-                            .foregroundColor(isDarkMode ? .white : .black)
-                            .disabled(false)
-                            .padding(.top, 24)
                         Spacer()
                         MinimalCircleButton(symbol: "xmark", accessibilityLabel: "Exit Focus", isDark: isDarkMode) {
                             withAnimation(.spring(response: 0.45, dampingFraction: 0.85)) { focusMode = false }
@@ -71,17 +63,26 @@ struct EditorView: View {
                         .textFieldStyle(PlainTextFieldStyle())
                         .font(.system(size: 32, weight: .bold, design: .default))
                         .foregroundColor(isDarkMode ? .white : .black)
-                        .padding(.horizontal, 20)
+                        .padding(.horizontal, 60) // Match 5vw spacing
                         .padding(.bottom, 20)
                         .transition(.opacity.combined(with: .scale))
                 }
                 
                 ZStack(alignment: .topLeading) {
                     if focusMode {
-                        FocusTextEditorRepresentable(text: $content, currentLine: $currentLineIndex, isDark: isDarkMode, centerLine: false, fontSize: 22)
-                            .padding(.horizontal, 120) // 10vw equivalent for most screens
-                            .padding(.top, 40)
-                            .transition(.opacity.combined(with: .scale))
+                        // In focus mode, title should be included in the same space as body
+                        VStack(spacing: 20) {
+                            TextField("Title", text: $title)
+                                .textFieldStyle(PlainTextFieldStyle())
+                                .font(.system(size: 32, weight: .bold, design: .default))
+                                .foregroundColor(isDarkMode ? .white : .black)
+                                .multilineTextAlignment(.leading)
+                            
+                            FocusTextEditorRepresentable(text: $content, currentLine: $currentLineIndex, isDark: isDarkMode, centerLine: false, fontSize: 22)
+                        }
+                        .padding(.horizontal, 60) // 5vw equivalent for most screens
+                        .padding(.top, 40)
+                        .transition(.opacity.combined(with: .scale))
                     } else {
                         CustomTextEditor(
                             text: $content,
@@ -89,7 +90,7 @@ struct EditorView: View {
                             textColor: isDarkMode ? .white : .black,
                             backgroundColor: .clear
                         )
-                        .padding(.horizontal, 120) // 10vw equivalent for most screens
+                        .padding(.horizontal, 60) // 5vw equivalent for most screens
                         .padding(.top, 8)
                         .padding(.bottom, 20)
                         .transition(.opacity)
@@ -98,7 +99,7 @@ struct EditorView: View {
                         Text("Start from here...")
                             .font(.system(size: 18, design: .monospaced))
                             .foregroundColor((isDarkMode ? Color.white : Color.black).opacity(0.32))
-                            .padding(.horizontal, 120) // match editor horizontal padding
+                            .padding(.horizontal, 60) // match editor horizontal padding
                             .padding(.top, 10) // closer to actual first baseline
                     }
                 }

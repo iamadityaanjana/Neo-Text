@@ -43,7 +43,18 @@ struct CustomTextEditor: NSViewRepresentable {
     
     func updateNSView(_ nsView: NSScrollView, context: Context) {
         guard let textView = context.coordinator.textView else { return }
-        if textView.string != text { textView.string = text }
+        // Only update if the plain text content actually changed
+        if textView.string != text { 
+            // Preserve formatting when updating from external changes
+            let currentSelection = textView.selectedRange()
+            textView.string = text
+            // Restore selection if possible
+            let newLength = text.count
+            if currentSelection.location <= newLength {
+                let newSelection = NSRange(location: min(currentSelection.location, newLength), length: 0)
+                textView.setSelectedRange(newSelection)
+            }
+        }
         textView.textColor = textColor
         textView.insertionPointColor = textColor
         textView.font = font
