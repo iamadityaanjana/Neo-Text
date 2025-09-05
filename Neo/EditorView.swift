@@ -17,6 +17,7 @@ struct EditorView: View {
     @State private var focusMode: Bool = false
     @State private var currentLineIndex: Int = 0
     @State private var contentRefreshTrigger = false
+    @State private var didLoad = false
     
     private var editorBackground: Color {
         isDarkMode ? Color.black : Color(red: 0.96, green: 0.96, blue: 0.86)
@@ -123,17 +124,18 @@ struct EditorView: View {
                 title = doc.title
                 content = doc.content
                 richContent = doc.richContent
+        didLoad = true
             }
         }
-        .onChange(of: content) { autoSave() }
-        .onChange(of: richContent) { autoSave() }
-        .onChange(of: title) {
-            autoSave()
-        }
+    .onChange(of: content) { autoSave() }
+    .onChange(of: richContent) { autoSave() }
+    .onChange(of: title) { autoSave() }
+    // No explicit programmatic loading here; NSTextView handles initial rich load
         .preferredColorScheme(isDarkMode ? .dark : .light)
     }
     
     private func autoSave() {
+    guard didLoad else { return }
         guard var doc = selectedDocument else { return }
         doc.title = title
         doc.content = content

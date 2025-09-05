@@ -28,7 +28,33 @@ class DocumentManager: ObservableObject {
         let fileURL = getFileURL()
         do {
             let data = try Data(contentsOf: fileURL)
-            documents = try JSONDecoder().decode([Document].self, from: data)
+            let decoder = JSONDecoder()
+            // Attempt to decode current schema first
+            do {
+                documents = try decoder.decode([Document].self, from: data)
+            } catch {
+                // Fallback: migrate from legacy schema without richContent
+                struct LegacyDocument: Codable {
+                    var id: UUID?
+                    var title: String
+                    var content: String
+                    var creationDate: Date?
+                    var lastEdited: Date?
+                }
+                let legacy = try decoder.decode([LegacyDocument].self, from: data)
+                let migrated: [Document] = legacy.map { ld in
+                    Document(
+                        id: ld.id ?? UUID(),
+                        title: ld.title,
+                        content: ld.content,
+                        richContent: nil,
+                        creationDate: ld.creationDate ?? Date(),
+                        lastEdited: ld.lastEdited ?? Date()
+                    )
+                }
+                documents = migrated
+                saveDocuments() // write back in new schema to avoid repeated migration
+            }
         } catch {
             print("Error loading documents: \(error)")
             documents = []
@@ -46,7 +72,7 @@ class DocumentManager: ObservableObject {
     }
     
     func addDocument(title: String, content: String = "") {
-        let newDoc = Document(title: title, content: content, creationDate: Date(), lastEdited: Date())
+        let newDoc = Document(title: title, content: content, richContent: Data(), creationDate: Date(), lastEdited: Date())
         documents.append(newDoc)
         saveDocuments()
     }

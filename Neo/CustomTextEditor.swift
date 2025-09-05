@@ -37,8 +37,26 @@ struct CustomTextEditor: NSViewRepresentable {
         textView.font = font
         textView.textColor = textColor
         textView.insertionPointColor = textColor
-        textView.string = text
         textView.textContainer?.lineFragmentPadding = 0
+
+        // Load initial content: prefer rich content if available (RTFD first, then RTF)
+        if let richData = richContent, !richData.isEmpty {
+            if let attributed = NSAttributedString(rtfd: richData, documentAttributes: nil) {
+                textView.textStorage?.setAttributedString(attributed)
+            } else if let attributed = NSAttributedString(rtf: richData, documentAttributes: nil) {
+                textView.textStorage?.setAttributedString(attributed)
+            } else {
+                textView.string = text
+            }
+        } else {
+            textView.string = text
+        }
+
+    // Ensure default typing is left-aligned
+    let defaultParagraphStyle = NSMutableParagraphStyle()
+    defaultParagraphStyle.alignment = .left
+    textView.defaultParagraphStyle = defaultParagraphStyle
+    textView.typingAttributes[.paragraphStyle] = defaultParagraphStyle
         
         scrollView.documentView = textView
         context.coordinator.textView = textView
@@ -46,41 +64,11 @@ struct CustomTextEditor: NSViewRepresentable {
     }
     
     func updateNSView(_ nsView: NSScrollView, context: Context) {
+        // Never overwrite content here; only update lightweight styling
         guard let textView = context.coordinator.textView else { return }
-        
-        // Check if this is a significant content change (like loading a new document)
-        let currentPlainText = textView.string
-        let isSignificantChange = abs(currentPlainText.count - text.count) > 100 || 
-                                 currentPlainText.isEmpty != text.isEmpty
-        
-        // Only update content if it's significantly different or we have rich content to load
-        if let richData = richContent, !richData.isEmpty, isSignificantChange {
-            // Try to load RTF data
-            if let attributedString = NSAttributedString(rtf: richData, documentAttributes: nil) {
-                let currentSelection = textView.selectedRange()
-                textView.textStorage?.setAttributedString(attributedString)
-                // Restore selection if reasonable
-                let newLength = attributedString.length
-                if currentSelection.location <= newLength {
-                    let newSelection = NSRange(location: min(currentSelection.location, newLength), length: 0)
-                    textView.setSelectedRange(newSelection)
-                }
-            }
-        } else if isSignificantChange && (richContent?.isEmpty ?? true) {
-            // Only update plain text for significant changes when no rich content
-            let currentSelection = textView.selectedRange()
-            textView.string = text
-            // Restore selection if possible
-            let newLength = text.count
-            if currentSelection.location <= newLength {
-                let newSelection = NSRange(location: min(currentSelection.location, newLength), length: 0)
-                textView.setSelectedRange(newSelection)
-            }
-        }
-        
         textView.textColor = textColor
         textView.insertionPointColor = textColor
-        textView.font = font
+        // Avoid resetting font here to preserve typingAttributes (bold/italic)
     }
     
     func makeCoordinator() -> Coordinator {
@@ -90,8 +78,10 @@ struct CustomTextEditor: NSViewRepresentable {
     class Coordinator: NSObject, NSTextViewDelegate {
         var parent: CustomTextEditor
         weak var textView: RichTextView?
-        var shouldLoadRichContent = false
-        var shouldLoadPlainText = false
+    var shouldLoadRichContent = false
+    var shouldLoadPlainText = false
+    var hasLoadedInitialContent = false
+    var isProgrammaticLoad = false
         
         init(_ parent: CustomTextEditor) {
             self.parent = parent
@@ -99,40 +89,16 @@ struct CustomTextEditor: NSViewRepresentable {
         
         func textDidChange(_ notification: Notification) {
             guard let textView = textView else { return }
+            if isProgrammaticLoad { isProgrammaticLoad = false; return }
             parent.text = textView.string
-            
-            // Save rich content as RTF, but only if we have rich content (images, formatting)
+
+            // Always save RTFD so images/attachments persist reliably
             if let textStorage = textView.textStorage {
                 let fullRange = NSRange(location: 0, length: textStorage.length)
-                
-                // Check if we actually have rich content worth saving
-                var hasRichContent = false
-                textStorage.enumerateAttribute(.attachment, in: fullRange, options: []) { value, _, stop in
-                    if value != nil {
-                        hasRichContent = true
-                        stop.pointee = true
-                    }
-                }
-                
-                if !hasRichContent {
-                    textStorage.enumerateAttribute(.font, in: fullRange, options: []) { value, _, stop in
-                        if let font = value as? NSFont {
-                            let traits = NSFontManager.shared.traits(of: font)
-                            if traits.contains(.boldFontMask) || traits.contains(.italicFontMask) {
-                                hasRichContent = true
-                                stop.pointee = true
-                            }
-                        }
-                    }
-                }
-                
-                if hasRichContent {
-                    if let rtfData = textStorage.rtf(from: fullRange, documentAttributes: [:]) {
-                        parent.richContent = rtfData
-                    }
-                } else {
-                    // Clear rich content if no formatting is present
-                    parent.richContent = nil
+                if let rtfdData = textStorage.rtfd(from: fullRange, documentAttributes: [:]) {
+                    parent.richContent = rtfdData
+                } else if let rtfData = textStorage.rtf(from: fullRange, documentAttributes: [:]) {
+                    parent.richContent = rtfData
                 }
             }
         }
@@ -211,7 +177,7 @@ class RichTextView: NSTextView {
     }
     
     private func insertImageFromPasteboard(image: NSImage) {
-        // Create resizable image attachment
+        // Create resizable image attachment with embedded data so it persists in RTF
         let attachment = NSTextAttachment()
         
         // Calculate size - max 300pt width, maintain aspect ratio
@@ -222,6 +188,13 @@ class RichTextView: NSTextView {
         let newHeight = newWidth * aspectRatio
         
         attachment.image = image
+        // Embed image data into fileWrapper (prefer PNG for lossless)
+        if let tiff = image.tiffRepresentation,
+           let rep = NSBitmapImageRep(data: tiff),
+           let png = rep.representation(using: .png, properties: [:]) {
+            attachment.fileWrapper = FileWrapper(regularFileWithContents: png)
+            attachment.fileWrapper?.preferredFilename = "image.png"
+        }
         attachment.bounds = CGRect(x: 0, y: 0, width: newWidth, height: newHeight)
         
         // Create attributed string with the image
@@ -255,20 +228,27 @@ class RichTextView: NSTextView {
         imageContainer.append(centeredImageString)
         imageContainer.append(NSAttributedString(string: "\n"))
         
-        // Apply paragraph style to the entire container
+    // Apply paragraph style to the entire container
         let containerParagraphStyle = NSMutableParagraphStyle()
         containerParagraphStyle.alignment = .center
         imageContainer.addAttribute(.paragraphStyle, value: containerParagraphStyle, range: NSRange(location: 0, length: imageContainer.length))
         
-        mutableString.append(imageContainer)
+    // Append image container and then a left-aligned newline to resume typing left
+    mutableString.append(imageContainer)
+    let trailing = NSMutableAttributedString(string: "\n")
+    let leftStyle = NSMutableParagraphStyle()
+    leftStyle.alignment = .left
+    trailing.addAttribute(.paragraphStyle, value: leftStyle, range: NSRange(location: 0, length: trailing.length))
+    mutableString.append(trailing)
         
         if shouldChangeText(in: selectedRange, replacementString: mutableString.string) {
             textStorage?.replaceCharacters(in: selectedRange, with: mutableString)
             didChangeText()
             
-            // Move cursor after the image
+            // Move cursor after the image and trailing newline, and set typing attributes to left-aligned
             let newLocation = selectedRange.location + mutableString.length
             setSelectedRange(NSRange(location: newLocation, length: 0))
+            typingAttributes[.paragraphStyle] = leftStyle
         }
     }
     
@@ -331,7 +311,7 @@ class RichTextView: NSTextView {
     private func insertImage(at url: URL) {
         guard let image = NSImage(contentsOf: url) else { return }
         
-        // Create resizable image attachment
+        // Create resizable image attachment with embedded data so it persists in RTF
         let attachment = NSTextAttachment()
         
         // Calculate size - max 300pt width, maintain aspect ratio
@@ -342,6 +322,16 @@ class RichTextView: NSTextView {
         let newHeight = newWidth * aspectRatio
         
         attachment.image = image
+        // Prefer embedding the original data when possible
+        if let data = try? Data(contentsOf: url) {
+            attachment.fileWrapper = FileWrapper(regularFileWithContents: data)
+            attachment.fileWrapper?.preferredFilename = url.lastPathComponent
+        } else if let tiff = image.tiffRepresentation,
+                  let rep = NSBitmapImageRep(data: tiff),
+                  let png = rep.representation(using: .png, properties: [:]) {
+            attachment.fileWrapper = FileWrapper(regularFileWithContents: png)
+            attachment.fileWrapper?.preferredFilename = "image.png"
+        }
         attachment.bounds = CGRect(x: 0, y: 0, width: newWidth, height: newHeight)
         
         // Create attributed string with the image
