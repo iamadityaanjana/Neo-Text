@@ -92,11 +92,110 @@ class RichTextView: NSTextView {
             case "k":
                 insertHyperlink()
                 return
+            case "v":
+                // Handle paste with image support
+                paste(nil)
+                return
             default: 
                 break
             }
         }
         super.keyDown(with: event)
+    }
+    
+    override func paste(_ sender: Any?) {
+        let pasteboard = NSPasteboard.general
+        
+        // Check for images first
+        if let imageData = pasteboard.data(forType: .tiff) ?? pasteboard.data(forType: .png),
+           let image = NSImage(data: imageData) {
+            insertImageFromPasteboard(image: image)
+            return
+        }
+        
+        // If no image, use default paste behavior
+        super.paste(sender)
+    }
+    
+    private func insertImageFromPasteboard(image: NSImage) {
+        // Create resizable image attachment
+        let attachment = NSTextAttachment()
+        
+        // Calculate size - max 300pt width, maintain aspect ratio
+        let maxWidth: CGFloat = 300
+        let originalSize = image.size
+        let aspectRatio = originalSize.height / originalSize.width
+        let newWidth = min(maxWidth, originalSize.width)
+        let newHeight = newWidth * aspectRatio
+        
+        attachment.image = image
+        attachment.bounds = CGRect(x: 0, y: 0, width: newWidth, height: newHeight)
+        
+        // Create attributed string with the image
+        let imageString = NSAttributedString(attachment: attachment)
+        
+        // Insert at current cursor position
+        let selectedRange = self.selectedRange()
+        
+        // Create a new line before and after the image, with center alignment
+        let mutableString = NSMutableAttributedString()
+        
+        // Add leading newline if not at start of line
+        if selectedRange.location > 0 {
+            let previousChar = (string as NSString).character(at: selectedRange.location - 1)
+            if previousChar != unichar(NSString.init(string: "\n").character(at: 0)) {
+                mutableString.append(NSAttributedString(string: "\n"))
+            }
+        }
+        
+        // Add the image with center alignment
+        let centeredImageString = NSMutableAttributedString(attributedString: imageString)
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.alignment = .center
+        paragraphStyle.paragraphSpacing = 10
+        paragraphStyle.paragraphSpacingBefore = 10
+        centeredImageString.addAttribute(.paragraphStyle, value: paragraphStyle, range: NSRange(location: 0, length: centeredImageString.length))
+        
+        // Make image container
+        let imageContainer = NSMutableAttributedString()
+        imageContainer.append(NSAttributedString(string: "\n"))
+        imageContainer.append(centeredImageString)
+        imageContainer.append(NSAttributedString(string: "\n"))
+        
+        // Apply paragraph style to the entire container
+        let containerParagraphStyle = NSMutableParagraphStyle()
+        containerParagraphStyle.alignment = .center
+        imageContainer.addAttribute(.paragraphStyle, value: containerParagraphStyle, range: NSRange(location: 0, length: imageContainer.length))
+        
+        mutableString.append(imageContainer)
+        
+        if shouldChangeText(in: selectedRange, replacementString: mutableString.string) {
+            textStorage?.replaceCharacters(in: selectedRange, with: mutableString)
+            didChangeText()
+            
+            // Move cursor after the image
+            let newLocation = selectedRange.location + mutableString.length
+            setSelectedRange(NSRange(location: newLocation, length: 0))
+        }
+    }
+    
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let menu = super.menu(for: event) ?? NSMenu()
+        
+        // Add hyperlink option if text is selected
+        let selectedRange = self.selectedRange()
+        if selectedRange.length > 0 {
+            let hyperlinkItem = NSMenuItem(title: "Add Hyperlink", action: #selector(addHyperlinkFromMenu), keyEquivalent: "")
+            hyperlinkItem.target = self
+            menu.insertItem(hyperlinkItem, at: 0)
+            menu.insertItem(NSMenuItem.separator(), at: 1)
+        }
+        
+        return menu
+    }
+    
+    @objc private func addHyperlinkFromMenu() {
+        insertHyperlink()
     }
     
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
@@ -146,16 +245,37 @@ class RichTextView: NSTextView {
         // Insert at current cursor position
         let selectedRange = self.selectedRange()
         
-        // Add newlines for proper spacing and centering
+        // Create a new line before and after the image, with center alignment
         let mutableString = NSMutableAttributedString()
-        mutableString.append(NSAttributedString(string: "\n"))
-        mutableString.append(imageString)
-        mutableString.append(NSAttributedString(string: "\n"))
         
-        // Apply center alignment to the image
+        // Add leading newline if not at start of line
+        if selectedRange.location > 0 {
+            let previousChar = (string as NSString).character(at: selectedRange.location - 1)
+            if previousChar != unichar(NSString.init(string: "\n").character(at: 0)) {
+                mutableString.append(NSAttributedString(string: "\n"))
+            }
+        }
+        
+        // Add the image with center alignment
+        let centeredImageString = NSMutableAttributedString(attributedString: imageString)
         let paragraphStyle = NSMutableParagraphStyle()
         paragraphStyle.alignment = .center
-        mutableString.addAttribute(.paragraphStyle, value: paragraphStyle, range: NSRange(location: 0, length: mutableString.length))
+        paragraphStyle.paragraphSpacing = 10
+        paragraphStyle.paragraphSpacingBefore = 10
+        centeredImageString.addAttribute(.paragraphStyle, value: paragraphStyle, range: NSRange(location: 0, length: centeredImageString.length))
+        
+        // Make image non-deletable by adding special character
+        let imageContainer = NSMutableAttributedString()
+        imageContainer.append(NSAttributedString(string: "\n"))
+        imageContainer.append(centeredImageString)
+        imageContainer.append(NSAttributedString(string: "\n"))
+        
+        // Apply paragraph style to the entire container
+        let containerParagraphStyle = NSMutableParagraphStyle()
+        containerParagraphStyle.alignment = .center
+        imageContainer.addAttribute(.paragraphStyle, value: containerParagraphStyle, range: NSRange(location: 0, length: imageContainer.length))
+        
+        mutableString.append(imageContainer)
         
         if shouldChangeText(in: selectedRange, replacementString: mutableString.string) {
             textStorage?.replaceCharacters(in: selectedRange, with: mutableString)
