@@ -12,9 +12,11 @@ struct EditorView: View {
     @Binding var selectedDocument: Document?
     @AppStorage("isDarkMode") private var isDarkMode = false
     @State private var content: String = ""
+    @State private var richContent: Data? = nil
     @State private var title: String = ""
     @State private var focusMode: Bool = false
     @State private var currentLineIndex: Int = 0
+    @State private var contentRefreshTrigger = false
     
     private var editorBackground: Color {
         isDarkMode ? Color.black : Color(red: 0.96, green: 0.96, blue: 0.86)
@@ -70,22 +72,30 @@ struct EditorView: View {
                 
                 ZStack(alignment: .topLeading) {
                     if focusMode {
-                        // In focus mode, title should be included in the same space as body
-                        VStack(spacing: 20) {
-                            TextField("Title", text: $title)
-                                .textFieldStyle(PlainTextFieldStyle())
-                                .font(.system(size: 32, weight: .bold, design: .default))
-                                .foregroundColor(isDarkMode ? .white : .black)
-                                .multilineTextAlignment(.leading)
+                        // In focus mode, title should be centered at top
+                        VStack(spacing: 0) {
+                            // Centered title at top
+                            HStack {
+                                Spacer()
+                                TextField("Title", text: $title)
+                                    .textFieldStyle(PlainTextFieldStyle())
+                                    .font(.system(size: 32, weight: .bold, design: .default))
+                                    .foregroundColor(isDarkMode ? .white : .black)
+                                    .multilineTextAlignment(.center)
+                                    .frame(maxWidth: 600)
+                                Spacer()
+                            }
+                            .padding(.top, 60)
+                            .padding(.bottom, 40)
                             
-                            FocusTextEditorRepresentable(text: $content, currentLine: $currentLineIndex, isDark: isDarkMode, centerLine: false, fontSize: 22)
+                            FocusTextEditorRepresentable(text: $content, richContent: $richContent, currentLine: $currentLineIndex, isDark: isDarkMode, centerLine: false, fontSize: 22)
                         }
                         .padding(.horizontal, 60) // 5vw equivalent for most screens
-                        .padding(.top, 40)
                         .transition(.opacity.combined(with: .scale))
                     } else {
                         CustomTextEditor(
                             text: $content,
+                            richContent: $richContent,
                             font: .monospacedSystemFont(ofSize: 18, weight: .regular),
                             textColor: isDarkMode ? .white : .black,
                             backgroundColor: .clear
@@ -112,9 +122,11 @@ struct EditorView: View {
             if let doc = selectedDocument {
                 title = doc.title
                 content = doc.content
+                richContent = doc.richContent
             }
         }
         .onChange(of: content) { autoSave() }
+        .onChange(of: richContent) { autoSave() }
         .onChange(of: title) {
             autoSave()
         }
@@ -125,6 +137,7 @@ struct EditorView: View {
         guard var doc = selectedDocument else { return }
         doc.title = title
         doc.content = content
+        doc.richContent = richContent
         doc.lastEdited = Date()
         documentManager.updateDocument(doc)
         selectedDocument = doc

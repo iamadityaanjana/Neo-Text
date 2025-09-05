@@ -4,6 +4,7 @@ import Combine
 // A custom NSViewRepresentable wrapping NSTextView to enable line centering + focus visuals.
 struct FocusTextEditorRepresentable: NSViewRepresentable {
     @Binding var text: String
+    @Binding var richContent: Data?
     @Binding var currentLine: Int
     var isDark: Bool
     var centerLine: Bool
@@ -30,8 +31,8 @@ struct FocusTextEditorRepresentable: NSViewRepresentable {
         
     let textView = CenteringTextView(frame: .zero, textContainer: textContainer)
     textView.backgroundColor = .clear
-    // Modest top padding; we'll scroll to center instead of dynamic inset growth.
-    textView.textContainerInset = NSSize(width: 0, height: 120)
+    // Minimal padding for focus mode to avoid cursor positioning issues
+    textView.textContainerInset = NSSize(width: 0, height: 20)
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = false
         textView.autoresizingMask = [.width]
@@ -44,6 +45,13 @@ struct FocusTextEditorRepresentable: NSViewRepresentable {
         textView.insertionPointColor = isDark ? .white : .black
     textView.string = text
     textView.textContainer?.lineFragmentPadding = 0
+        
+        // Set default paragraph style with left alignment
+        let defaultParagraphStyle = NSMutableParagraphStyle()
+        defaultParagraphStyle.alignment = .left
+        textView.defaultParagraphStyle = defaultParagraphStyle
+        textView.typingAttributes[.paragraphStyle] = defaultParagraphStyle
+        
         textView.focusDelegate = context.coordinator
         
         scrollView.documentView = textView
@@ -55,9 +63,27 @@ struct FocusTextEditorRepresentable: NSViewRepresentable {
     
     func updateNSView(_ nsView: NSScrollView, context: Context) {
         guard let textView = context.coordinator.textView else { return }
-        // Only update if the plain text content actually changed
-        if textView.string != text { 
-            // Preserve formatting when updating from external changes
+        
+        // Check if this is a significant content change (like loading a new document)
+        let currentPlainText = textView.string
+        let isSignificantChange = abs(currentPlainText.count - text.count) > 100 || 
+                                 currentPlainText.isEmpty != text.isEmpty
+        
+        // Only update content if it's significantly different or we have rich content to load
+        if let richData = richContent, !richData.isEmpty, isSignificantChange {
+            // Try to load RTF data
+            if let attributedString = NSAttributedString(rtf: richData, documentAttributes: nil) {
+                let currentSelection = textView.selectedRange()
+                textView.textStorage?.setAttributedString(attributedString)
+                // Restore selection if reasonable
+                let newLength = attributedString.length
+                if currentSelection.location <= newLength {
+                    let newSelection = NSRange(location: min(currentSelection.location, newLength), length: 0)
+                    textView.setSelectedRange(newSelection)
+                }
+            }
+        } else if isSignificantChange && (richContent?.isEmpty ?? true) {
+            // Only update plain text for significant changes when no rich content
             let currentSelection = textView.selectedRange()
             textView.string = text
             // Restore selection if possible
@@ -67,6 +93,7 @@ struct FocusTextEditorRepresentable: NSViewRepresentable {
                 textView.setSelectedRange(newSelection)
             }
         }
+        
         textView.textColor = isDark ? .white : .black
         textView.insertionPointColor = isDark ? .white : .black
         if let f = textView.font, abs(f.pointSize - fontSize) > 0.5 { textView.font = .monospacedSystemFont(ofSize: fontSize, weight: .regular) }
@@ -77,6 +104,8 @@ struct FocusTextEditorRepresentable: NSViewRepresentable {
         weak var textView: CenteringTextView?
         weak var scrollView: NSScrollView?
         private var cancellables = Set<AnyCancellable>()
+        var shouldLoadRichContent = false
+        var shouldLoadPlainText = false
         
         init(_ parent: FocusTextEditorRepresentable) {
             self.parent = parent
@@ -85,8 +114,49 @@ struct FocusTextEditorRepresentable: NSViewRepresentable {
         func textDidChange(_ notification: Notification) {
             guard let tv = textView else { return }
             parent.text = tv.string
+            
+            // Save rich content as RTF, but only if we have rich content (images, formatting)
+            if let textStorage = tv.textStorage {
+                let fullRange = NSRange(location: 0, length: textStorage.length)
+                
+                // Check if we actually have rich content worth saving
+                var hasRichContent = false
+                textStorage.enumerateAttribute(.attachment, in: fullRange, options: []) { value, _, stop in
+                    if value != nil {
+                        hasRichContent = true
+                        stop.pointee = true
+                    }
+                }
+                
+                if !hasRichContent {
+                    textStorage.enumerateAttribute(.font, in: fullRange, options: []) { value, _, stop in
+                        if let font = value as? NSFont {
+                            let traits = NSFontManager.shared.traits(of: font)
+                            if traits.contains(.boldFontMask) || traits.contains(.italicFontMask) {
+                                hasRichContent = true
+                                stop.pointee = true
+                            }
+                        }
+                    }
+                }
+                
+                if hasRichContent {
+                    if let rtfData = textStorage.rtf(from: fullRange, documentAttributes: [:]) {
+                        parent.richContent = rtfData
+                    }
+                } else {
+                    // Clear rich content if no formatting is present
+                    parent.richContent = nil
+                }
+            }
+            
             updateCurrentLine()
             if parent.centerLine { centerCurrentLine(animated: true) }
+        }
+        
+        func loadDocumentContent() {
+            shouldLoadRichContent = true
+            shouldLoadPlainText = true
         }
 
         func textViewDidChangeSelection(_ notification: Notification) {
@@ -286,9 +356,14 @@ class CenteringTextView: NSTextView {
             textStorage?.replaceCharacters(in: selectedRange, with: mutableString)
             didChangeText()
             
-            // Move cursor after the image
+            // Move cursor after the image and extra newline, ensuring left alignment
             let newLocation = selectedRange.location + mutableString.length
             setSelectedRange(NSRange(location: newLocation, length: 0))
+            
+            // Ensure typing attributes are reset to default (left-aligned)
+            let defaultStyle = NSMutableParagraphStyle()
+            defaultStyle.alignment = .left
+            typingAttributes[.paragraphStyle] = defaultStyle
         }
         
         focusDelegate?.updateCurrentLine()

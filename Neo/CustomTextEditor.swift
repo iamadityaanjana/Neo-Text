@@ -2,6 +2,7 @@ import SwiftUI
 
 struct CustomTextEditor: NSViewRepresentable {
     @Binding var text: String
+    @Binding var richContent: Data?
     var font: NSFont
     var textColor: NSColor
     var backgroundColor: NSColor
@@ -46,9 +47,27 @@ struct CustomTextEditor: NSViewRepresentable {
     
     func updateNSView(_ nsView: NSScrollView, context: Context) {
         guard let textView = context.coordinator.textView else { return }
-        // Only update if the plain text content actually changed
-        if textView.string != text { 
-            // Preserve formatting when updating from external changes
+        
+        // Check if this is a significant content change (like loading a new document)
+        let currentPlainText = textView.string
+        let isSignificantChange = abs(currentPlainText.count - text.count) > 100 || 
+                                 currentPlainText.isEmpty != text.isEmpty
+        
+        // Only update content if it's significantly different or we have rich content to load
+        if let richData = richContent, !richData.isEmpty, isSignificantChange {
+            // Try to load RTF data
+            if let attributedString = NSAttributedString(rtf: richData, documentAttributes: nil) {
+                let currentSelection = textView.selectedRange()
+                textView.textStorage?.setAttributedString(attributedString)
+                // Restore selection if reasonable
+                let newLength = attributedString.length
+                if currentSelection.location <= newLength {
+                    let newSelection = NSRange(location: min(currentSelection.location, newLength), length: 0)
+                    textView.setSelectedRange(newSelection)
+                }
+            }
+        } else if isSignificantChange && (richContent?.isEmpty ?? true) {
+            // Only update plain text for significant changes when no rich content
             let currentSelection = textView.selectedRange()
             textView.string = text
             // Restore selection if possible
@@ -58,6 +77,7 @@ struct CustomTextEditor: NSViewRepresentable {
                 textView.setSelectedRange(newSelection)
             }
         }
+        
         textView.textColor = textColor
         textView.insertionPointColor = textColor
         textView.font = font
@@ -70,6 +90,8 @@ struct CustomTextEditor: NSViewRepresentable {
     class Coordinator: NSObject, NSTextViewDelegate {
         var parent: CustomTextEditor
         weak var textView: RichTextView?
+        var shouldLoadRichContent = false
+        var shouldLoadPlainText = false
         
         init(_ parent: CustomTextEditor) {
             self.parent = parent
@@ -78,6 +100,46 @@ struct CustomTextEditor: NSViewRepresentable {
         func textDidChange(_ notification: Notification) {
             guard let textView = textView else { return }
             parent.text = textView.string
+            
+            // Save rich content as RTF, but only if we have rich content (images, formatting)
+            if let textStorage = textView.textStorage {
+                let fullRange = NSRange(location: 0, length: textStorage.length)
+                
+                // Check if we actually have rich content worth saving
+                var hasRichContent = false
+                textStorage.enumerateAttribute(.attachment, in: fullRange, options: []) { value, _, stop in
+                    if value != nil {
+                        hasRichContent = true
+                        stop.pointee = true
+                    }
+                }
+                
+                if !hasRichContent {
+                    textStorage.enumerateAttribute(.font, in: fullRange, options: []) { value, _, stop in
+                        if let font = value as? NSFont {
+                            let traits = NSFontManager.shared.traits(of: font)
+                            if traits.contains(.boldFontMask) || traits.contains(.italicFontMask) {
+                                hasRichContent = true
+                                stop.pointee = true
+                            }
+                        }
+                    }
+                }
+                
+                if hasRichContent {
+                    if let rtfData = textStorage.rtf(from: fullRange, documentAttributes: [:]) {
+                        parent.richContent = rtfData
+                    }
+                } else {
+                    // Clear rich content if no formatting is present
+                    parent.richContent = nil
+                }
+            }
+        }
+        
+        func loadDocumentContent() {
+            shouldLoadRichContent = true
+            shouldLoadPlainText = true
         }
     }
 }
